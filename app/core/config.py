@@ -16,13 +16,14 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # --- Google Gemini ---
-    gemini_api_key: str = ""
+    # --- Ollama (local LLM) ---
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1"
 
     # --- Instagram / Meta ---
     insta_verify_token: str = ""
     insta_access_token: str = ""
-    fb_page_id: str = ""
+    insta_account_id: str = ""
 
     # --- Database ---
     database_url: str = "sqlite:///./kyana.db"

@@ -1,5 +1,7 @@
 """
 Instagram Graph API service — send messages and verify webhooks.
+
+Uses the new Instagram API (with Instagram Login) endpoints.
 """
 
 import asyncio
@@ -12,23 +14,22 @@ from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-GRAPH_API_URL = "https://graph.facebook.com/v19.0"
+GRAPH_API_URL = "https://graph.instagram.com/v25.0"
 
 
 # ─── Send a message via the Instagram Messaging API ──────
 
 async def send_message(recipient_id: str, text: str) -> bool:
     """
-    Send a text message to an Instagram user via the Graph API.
+    Send a text message to an Instagram user via the Instagram Graph API.
 
     Returns ``True`` on success, ``False`` otherwise.
     """
     settings = get_settings()
-    url = f"{GRAPH_API_URL}/{settings.fb_page_id}/messages"
+    url = f"{GRAPH_API_URL}/{settings.insta_account_id}/messages"
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text},
-        "messaging_type": "RESPONSE",
     }
     headers = {
         "Authorization": f"Bearer {settings.insta_access_token}",
@@ -82,6 +83,7 @@ async def simulate_human_delay() -> None:
     For the MVP this uses ``asyncio.sleep``; in production this would be
     replaced by a task‑queue delay (Celery / ARQ).
     """
-    delay = random.uniform(30, 120)
+    # delay = random.uniform(30, 120)
+    delay = 5
     logger.info("Simulating human delay: %.1f s", delay)
     await asyncio.sleep(delay)

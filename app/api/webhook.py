@@ -15,7 +15,7 @@ from app.models.conversation import (
     MessageLog,
 )
 from app.models.database import get_db
-from app.services import gemini_service, instagram_service
+from app.services import ollama_service, instagram_service
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ async def receive_webhook(
     Flow per message:
     1. Look up (or create) the conversation state.
     2. If mode is *manual* → log and skip.
-    3. Call Gemini for a response.
+    3. Call Ollama/Llama 3.1 for a response.
     4. If ``needs_human`` → switch to manual, alert, skip.
     5. Simulate human delay, then send the reply.
     6. Log everything.
@@ -64,9 +64,17 @@ async def receive_webhook(
 
     entries: list[dict] = body.get("entry", [])
     for entry in entries:
+        # New Instagram API: messages arrive under "messaging"
         messaging_events: list[dict] = entry.get("messaging", [])
         for event in messaging_events:
             await _handle_messaging_event(event, db)
+
+        # Instagram Webhooks API: some events arrive under "changes"
+        changes: list[dict] = entry.get("changes", [])
+        for change in changes:
+            if change.get("field") == "messages":
+                value = change.get("value", {})
+                await _handle_messaging_event(value, db)
 
     return {"status": "ok"}
 
@@ -98,11 +106,11 @@ async def _handle_messaging_event(event: dict, db: Session) -> None:
         logger.info("Conversation %s is MANUAL — skipping AI", sender_id)
         return
 
-    # 4. Build lightweight history for Gemini context
+    # 4. Build lightweight history for Ollama context
     history = _build_history(db, conversation.id, limit=6)
 
     # 5. Generate AI response
-    ai_result = await gemini_service.generate_response(text, history)
+    ai_result = await ollama_service.generate_response(text, history)
 
     # 6. If the AI flags doubt → switch to manual
     if ai_result.needs_human:
@@ -184,7 +192,7 @@ def _build_history(
     limit: int = 6,
 ) -> list[dict[str, str]]:
     """
-    Build a Gemini‑compatible conversation history from the last *limit*
+    Build an Ollama‑compatible conversation history from the last *limit*
     messages (oldest → newest).
     """
     messages = (
@@ -198,6 +206,6 @@ def _build_history(
 
     history: list[dict[str, str]] = []
     for msg in messages:
-        role = "user" if msg.direction == MessageDirection.INBOUND else "model"
-        history.append({"role": role, "parts": [msg.content]})
+        role = "user" if msg.direction == MessageDirection.INBOUND else "assistant"
+        history.append({"role": role, "content": msg.content})
     return history

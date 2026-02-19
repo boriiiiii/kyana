@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import dashboard, webhook
@@ -76,3 +77,25 @@ app.include_router(dashboard.router)
 async def health_check() -> dict[str, str]:
     """Simple health check endpoint."""
     return {"status": "ok", "app": settings.app_name}
+
+
+@app.get("/privacy", tags=["system"])
+async def privacy_policy() -> HTMLResponse:
+    """Basic privacy policy page required by Meta."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content="""
+    <!DOCTYPE html>
+    <html><head><title>Kyana — Privacy Policy</title></head>
+    <body style="font-family:sans-serif;max-width:600px;margin:40px auto;padding:0 20px;">
+    <h1>Privacy Policy — Kyana</h1>
+    <p>Kyana is an internal AI assistant tool. It processes Instagram direct messages
+    solely to provide automated responses on behalf of the account owner.</p>
+    <ul>
+        <li>We do not share personal data with third parties.</li>
+        <li>Messages are stored temporarily for conversation context.</li>
+        <li>No data is sold or used for advertising.</li>
+    </ul>
+    <p>Contact: the account owner via Instagram DM.</p>
+    </body></html>
+    """)
+

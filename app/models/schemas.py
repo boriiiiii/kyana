@@ -8,10 +8,10 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
-# ─── Gemini ───────────────────────────────────────────────
+# ─── AI Response ──────────────────────────────────────────
 
-class GeminiResponse(BaseModel):
-    """Structured output expected from the Gemini model."""
+class AIResponse(BaseModel):
+    """Structured output expected from the LLM (Ollama / Llama 3.1)."""
 
     response: str = Field(..., description="The AI-generated reply text")
     needs_human: bool = Field(

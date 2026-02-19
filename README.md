@@ -1,17 +1,19 @@
 # 💇‍♀️ Kyana — Assistant IA Incognito pour Coiffeuse
 
-Kyana est un backend **FastAPI** qui gère automatiquement les messages privés Instagram d'une coiffeuse indépendante, en utilisant **Google Gemini 1.5 Flash** pour générer des réponses naturelles — comme si c'était la coiffeuse elle-même qui tapait.
+Kyana est un backend **FastAPI** qui gère automatiquement les messages privés Instagram d'une coiffeuse indépendante, en utilisant **Ollama (Llama 3.1)** en local pour générer des réponses naturelles — comme si c'était la coiffeuse elle-même qui tapait.
 
 ---
 
 ## ✨ Fonctionnalités
 
-- **Réponses IA naturelles** — ton Instagram, tutoiement, emojis discrets, phrases courtes
+- **IA locale** — utilise Ollama + Llama 3.1, aucun appel cloud, 100 % privé
+- **Réponses naturelles** — ton Instagram, tutoiement, emojis discrets, phrases courtes
 - **Logique de doute** — si l'IA n'est pas sûre, la conversation bascule en mode *manuel* et une alerte est émise
 - **Délai humain** — simule un temps de réponse réaliste (30–120 secondes)
 - **Mode auto / manuel** — chaque conversation peut être gérée par l'IA ou reprise à la main
 - **Dashboard API** — endpoints REST prêts pour un futur frontend Next.js
 - **Historique complet** — tous les messages sont stockés en base (SQLite)
+- **Privacy policy** — page `/privacy` intégrée, requise par Meta
 
 ---
 
@@ -21,23 +23,24 @@ Kyana est un backend **FastAPI** qui gère automatiquement les messages privés 
 kyana/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py                ← Point d'entrée FastAPI
+│   ├── main.py                 ← Point d'entrée FastAPI
 │   ├── core/
-│   │   ├── __init__.py
-│   │   └── config.py          ← Configuration (.env)
+│   │   └── config.py           ← Configuration (.env / Pydantic Settings)
 │   ├── models/
-│   │   ├── __init__.py
-│   │   ├── database.py        ← Connexion SQLite / SQLAlchemy
-│   │   ├── conversation.py    ← Modèles ORM (tables)
-│   │   └── schemas.py         ← Schémas Pydantic (API)
+│   │   ├── database.py         ← Connexion SQLite / SQLAlchemy
+│   │   ├── conversation.py     ← Modèles ORM (tables)
+│   │   └── schemas.py          ← Schémas Pydantic (API)
 │   ├── services/
-│   │   ├── __init__.py
-│   │   ├── gemini_service.py  ← Logique IA (Gemini)
-│   │   └── instagram_service.py ← Envoi de messages + webhook
+│   │   ├── ollama_service.py   ← 🧠 Logique IA (Ollama / Llama 3.1)
+│   │   ├── instagram_service.py ← Envoi de messages + webhook
+│   │   └── gemini_service.py   ← (legacy — non utilisé)
 │   └── api/
-│       ├── __init__.py
-│       ├── webhook.py         ← Endpoints webhook Instagram
-│       └── dashboard.py       ← Endpoints dashboard
+│       ├── webhook.py          ← Endpoints webhook Instagram
+│       └── dashboard.py        ← Endpoints dashboard
+├── tests/
+│   ├── test_all.py
+│   ├── test_ollama.py
+│   └── test_webhook.py
 ├── requirements.txt
 ├── .env.example
 └── .gitignore
@@ -45,109 +48,12 @@ kyana/
 
 ---
 
-## 📄 Détail de chaque fichier
+## 🚀 Lancer le projet
 
-### `app/main.py` — Point d'entrée
+### Prérequis
 
-Le cœur de l'application. Ce fichier :
-- Crée l'app FastAPI avec métadonnées (titre, description, version)
-- Configure le **CORS** pour autoriser `localhost:3000` (futur frontend Next.js)
-- Branche les routers (webhook + dashboard)
-- Crée les tables en base au démarrage (`lifespan`)
-- Expose un endpoint `/health` pour vérifier que le serveur tourne
-
-### `app/core/config.py` — Configuration
-
-Charge les variables d'environnement depuis le fichier `.env` grâce à **Pydantic Settings**. Variables disponibles :
-
-| Variable | Description |
-|----------|-------------|
-| `GEMINI_API_KEY` | Clé API Google Gemini |
-| `INSTA_VERIFY_TOKEN` | Token de vérification webhook (tu le choisis toi-même) |
-| `INSTA_ACCESS_TOKEN` | Token d'accès Instagram Graph API |
-| `FB_PAGE_ID` | ID de ta page Facebook liée à Instagram |
-| `DATABASE_URL` | URL de la base (par défaut : `sqlite:///./kyana.db`) |
-
-La fonction `get_settings()` est un **singleton** — le fichier `.env` n'est lu qu'une seule fois.
-
-### `app/models/database.py` — Base de données
-
-Configure **SQLAlchemy** avec SQLite :
-- `engine` — le moteur de connexion
-- `SessionLocal` — la factory de sessions
-- `Base` — la classe de base pour tous les modèles ORM
-- `get_db()` — une dépendance FastAPI qui fournit une session DB et la ferme après usage
-
-### `app/models/conversation.py` — Modèles ORM (tables)
-
-Définit les deux tables de la base :
-
-**`conversation_states`** — une ligne par client Instagram :
-| Colonne | Rôle |
-|---------|------|
-| `sender_id` | L'identifiant Instagram du client (unique) |
-| `mode` | `auto` (IA répond) ou `manual` (tu réponds toi-même) |
-| `last_message_at` | Date du dernier message |
-
-**`message_logs`** — l'historique complet des échanges :
-| Colonne | Rôle |
-|---------|------|
-| `conversation_id` | Lien vers la conversation |
-| `direction` | `inbound` (client → toi) ou `outbound` (toi → client) |
-| `content` | Le texte du message |
-| `needs_human` | `true` si l'IA a flaggé ce message comme douteux |
-
-### `app/models/schemas.py` — Schémas Pydantic
-
-Les "formes" des données échangées via l'API :
-- `GeminiResponse` — la réponse structurée de Gemini (`response` + `needs_human`)
-- `ConversationOut` / `MessageOut` — ce que les endpoints renvoient au frontend
-- `ConversationModeUpdate` — le payload pour basculer auto ↔ manuel
-- `DashboardStats` — les stats globales (nombre de conversations, messages, alertes)
-
-### `app/services/gemini_service.py` — Service IA
-
-Le cerveau de Kyana. Ce fichier :
-- Configure le client **Google Gemini 1.5 Flash**
-- Contient le **system prompt** qui force le ton "coiffeuse Instagram" (tutoiement, emojis, brièveté)
-- Envoie les messages au modèle avec l'historique de conversation pour le contexte
-- Retourne un JSON structuré `{ "response": "...", "needs_human": true/false }`
-- Si Gemini renvoie un format inattendu ou une erreur → `needs_human = true` automatiquement
-
-### `app/services/instagram_service.py` — Service Instagram
-
-Gère la communication avec l'API Meta / Instagram :
-- `send_message()` — envoie un message via la Graph API (POST)
-- `verify_webhook()` — valide le challenge de vérification Meta
-- `simulate_human_delay()` — attend 30 à 120 secondes (aléatoire) avant de répondre, pour que ça fasse naturel
-
-### `app/api/webhook.py` — Endpoints Webhook
-
-Les deux endpoints requis par Meta :
-
-**`GET /webhook`** — Vérification initiale. Meta envoie un token et un challenge, le serveur vérifie le token et renvoie le challenge.
-
-**`POST /webhook`** — Réception des messages. Pour chaque message entrant :
-1. Récupère ou crée la conversation du client
-2. Si le mode est `manual` → log le message, ne fait rien d'autre
-3. Appelle Gemini avec le message + historique récent
-4. Si `needs_human` → passe en manuel + alerte dans les logs 🚨
-5. Sinon → attend un délai aléatoire, puis envoie la réponse
-
-### `app/api/dashboard.py` — Endpoints Dashboard
-
-Les endpoints pour le futur frontend Next.js :
-
-| Méthode | URL | Rôle |
-|---------|-----|------|
-| `GET` | `/api/stats` | Stats globales (conversations, messages, alertes) |
-| `GET` | `/api/conversations` | Liste des conversations avec aperçu du dernier message |
-| `GET` | `/api/conversations/{id}/messages` | Historique d'une conversation |
-| `PATCH` | `/api/conversations/{id}/mode` | Basculer auto ↔ manuel |
-
----
-
-## 🚀 Installation
+- **Python 3.11+**
+- **Ollama** installé et lancé sur ta machine → [ollama.com](https://ollama.com/)
 
 ### 1. Cloner le repo
 
@@ -156,41 +62,72 @@ git clone https://github.com/boriiiiii/kyana.git
 cd kyana
 ```
 
-### 2. Créer l'environnement virtuel
+### 2. Installer Ollama et le modèle
+
+```bash
+# Installer Ollama (macOS)
+brew install ollama
+
+# Lancer le serveur Ollama (dans un terminal séparé)
+ollama serve
+
+# Télécharger le modèle Llama 3.1
+ollama pull llama3.1
+```
+
+> **Note :** Ollama doit tourner en arrière-plan (`ollama serve`) avant de lancer Kyana. Par défaut il écoute sur `http://localhost:11434`.
+
+### 3. Créer l'environnement virtuel
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 3. Installer les dépendances
+### 4. Installer les dépendances Python
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Configurer les variables d'environnement
+### 5. Configurer les variables d'environnement
 
 ```bash
 cp .env.example .env
 ```
 
-Puis ouvre `.env` et remplis tes clés :
+Puis ouvre `.env` et remplis tes valeurs :
 
 ```env
-GEMINI_API_KEY=ta_cle_gemini
+# Ollama (optionnel si tu gardes les valeurs par défaut)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1
+
+# Instagram / Meta (requis pour la prod)
 INSTA_VERIFY_TOKEN=un_token_que_tu_inventes
 INSTA_ACCESS_TOKEN=ton_token_instagram
-FB_PAGE_ID=ton_id_page_facebook
+INSTA_ACCOUNT_ID=ton_id_compte_instagram
 ```
 
-### 5. Lancer le serveur
+### 6. Lancer le serveur
 
 ```bash
-uvicorn app.main:app --reload
+make dev
 ```
 
-Le serveur démarre sur `http://localhost:8000`. La base SQLite (`kyana.db`) est créée automatiquement au premier lancement.
+> Équivalent à `uvicorn app.main:app --reload`
+
+Le serveur démarre sur **`http://localhost:8000`**. La base SQLite (`kyana.db`) est créée automatiquement au premier lancement.
+
+### Commandes disponibles
+
+| Commande | Description |
+|----------|-------------|
+| `make dev` | Lancer le serveur avec hot-reload |
+| `make run` | Lancer le serveur (production) |
+| `make test` | Lancer les tests |
+| `make install` | Installer les dépendances |
+| `make setup` | Setup complet (venv + deps + .env) |
 
 ---
 
@@ -201,6 +138,13 @@ Le serveur démarre sur `http://localhost:8000`. La base SQLite (`kyana.db`) est
 ```bash
 curl http://localhost:8000/health
 # → {"status":"ok","app":"Kyana"}
+```
+
+### Vérifier qu'Ollama est connecté
+
+```bash
+curl http://localhost:11434/api/tags
+# → liste des modèles disponibles (llama3.1 doit y être)
 ```
 
 ### Tester le webhook
@@ -224,6 +168,12 @@ curl http://localhost:8000/api/stats
 # → {"total_conversations":0,"auto_conversations":0,...}
 ```
 
+### Lancer les tests
+
+```bash
+pytest tests/ -v
+```
+
 ### Documentation interactive
 
 FastAPI génère automatiquement une doc interactive :
@@ -232,10 +182,24 @@ FastAPI génère automatiquement une doc interactive :
 
 ---
 
+## ⚙️ Variables d'environnement
+
+| Variable | Description | Défaut |
+|----------|-------------|--------|
+| `OLLAMA_BASE_URL` | URL du serveur Ollama | `http://localhost:11434` |
+| `OLLAMA_MODEL` | Modèle LLM à utiliser | `llama3.1` |
+| `INSTA_VERIFY_TOKEN` | Token de vérification webhook (tu le choisis) | — |
+| `INSTA_ACCESS_TOKEN` | Token d'accès Instagram Graph API | — |
+| `INSTA_ACCOUNT_ID` | ID du compte Instagram professionnel | — |
+| `DATABASE_URL` | URL de la base de données | `sqlite:///./kyana.db` |
+| `DEBUG` | Mode debug | `false` |
+
+---
+
 ## 🔗 Configurer le Webhook Meta
 
 1. Va sur [Meta for Developers](https://developers.facebook.com/)
-2. Crée une app → ajoute le produit **Messenger** ou **Instagram**
+2. Crée une app → ajoute le produit **Instagram**
 3. Dans la config webhook, entre :
    - **URL** : `https://ton-domaine.com/webhook` (il faut un domaine HTTPS public — utilise [ngrok](https://ngrok.com/) pour le dev)
    - **Token de vérification** : la valeur que tu as mise dans `INSTA_VERIFY_TOKEN`
@@ -243,13 +207,40 @@ FastAPI génère automatiquement une doc interactive :
 
 ---
 
+## 📡 Endpoints API
+
+### Webhook (Meta/Instagram)
+
+| Méthode | URL | Rôle |
+|---------|-----|------|
+| `GET` | `/webhook` | Vérification initiale Meta (challenge-response) |
+| `POST` | `/webhook` | Réception des messages Instagram entrants |
+
+### Dashboard
+
+| Méthode | URL | Rôle |
+|---------|-----|------|
+| `GET` | `/api/stats` | Stats globales (conversations, messages, alertes) |
+| `GET` | `/api/conversations` | Liste des conversations avec aperçu du dernier message |
+| `GET` | `/api/conversations/{id}/messages` | Historique d'une conversation |
+| `PATCH` | `/api/conversations/{id}/mode` | Basculer auto ↔ manuel |
+
+### Système
+
+| Méthode | URL | Rôle |
+|---------|-----|------|
+| `GET` | `/health` | Health check |
+| `GET` | `/privacy` | Page de politique de confidentialité (requise par Meta) |
+
+---
+
 ## 🧠 Comment fonctionne la logique de doute
 
-Quand un message arrive, Gemini répond avec un JSON :
+Quand un message arrive, l'IA (Llama 3.1 via Ollama) répond avec un JSON :
 
 ```json
 {
-  "response": "salut ! je regarde mon planning et je te dis ça 😊",
+  "reply": "salut ! je regarde mon planning et je te dis ça 😊",
   "needs_human": false
 }
 ```
@@ -262,11 +253,25 @@ Si `needs_human` est `true` (question hors sujet, demande de RDV précis, récla
 
 ---
 
+## 📦 Stack technique
+
+| Composant | Technologie |
+|-----------|-------------|
+| Backend | FastAPI (Python 3.11+) |
+| LLM | Ollama + Llama 3.1 (local) |
+| Base de données | SQLite + SQLAlchemy 2.0 |
+| HTTP client | httpx (async) |
+| Validation | Pydantic v2 |
+| Messaging | Instagram Graph API v25.0 |
+
+---
+
 ## 📌 Prochaines étapes
 
 - [ ] Brancher un frontend Next.js sur les endpoints `/api/*`
 - [ ] Remplacer le `asyncio.sleep` par une vraie file d'attente (Celery / ARQ)
 - [ ] Ajouter l'authentification sur les endpoints dashboard
+- [ ] Supprimer le legacy `gemini_service.py`
 - [ ] Déployer (Railway, Render, VPS…)
 
 ---
