@@ -28,9 +28,19 @@ class Settings(BaseSettings):
     # --- Database ---
     database_url: str = "sqlite:///./kyana.db"
 
+    # --- iCloud CalDAV ---
+    caldav_url: str = "https://caldav.icloud.com"
+    caldav_email: str = ""
+    caldav_app_password: str = ""
+    # Nom exact du calendrier iCloud à utiliser (ex: "Personnel", "Travail").
+    # Si vide, le service choisit automatiquement le premier calendrier éditable.
+    caldav_calendar_name: str = ""
+
     # --- App ---
     app_name: str = "Kyana"
     debug: bool = False
+    # Secondes d'attente après le dernier message avant de répondre (debounce)
+    response_debounce_seconds: int = 10
 
 
 @lru_cache

@@ -1,5 +1,11 @@
 """
 Webhook API routes — handles Meta/Instagram webhook verification and incoming messages.
+
+Debounce pattern:
+    When a message arrives, we do NOT respond immediately. Instead, we wait
+    ``RESPONSE_DEBOUNCE_SECONDS`` after the *last* message from that sender.
+    If more messages arrive during that window, the timer resets and we
+    accumulate all messages before sending a single AI response.
 """
 
 import asyncio
@@ -16,10 +22,17 @@ from app.models.conversation import (
 )
 from app.models.database import get_db
 from app.services import ollama_service, instagram_service
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["webhook"])
+
+# ── Debounce state (in-memory, per sender) ───────────────
+# sender_id → pending asyncio.Task
+_pending_tasks: dict[str, asyncio.Task] = {}
+# sender_id → list of accumulated message texts
+_message_queues: dict[str, list[str]] = {}
 
 
 # ─── GET /webhook — Meta verification challenge ─────────
@@ -31,10 +44,7 @@ async def verify_webhook(
     hub_verify_token: str = Query("", alias="hub.verify_token"),
     hub_challenge: str = Query("", alias="hub.challenge"),
 ) -> Response:
-    """
-    Handle the one‑time verification challenge sent by Meta
-    when you register the webhook URL.
-    """
+    """Handle the one‑time verification challenge sent by Meta."""
     challenge = instagram_service.verify_webhook(hub_mode, hub_verify_token, hub_challenge)
     if challenge is not None:
         return Response(content=challenge, media_type="text/plain")
@@ -48,33 +58,18 @@ async def receive_webhook(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    """
-    Receive incoming Instagram messages via the Meta webhook.
-
-    Flow per message:
-    1. Look up (or create) the conversation state.
-    2. If mode is *manual* → log and skip.
-    3. Call Ollama/Llama 3.1 for a response.
-    4. If ``needs_human`` → switch to manual, alert, skip.
-    5. Simulate human delay, then send the reply.
-    6. Log everything.
-    """
+    """Receive incoming Instagram messages via the Meta webhook."""
     body: dict = await request.json()
     logger.debug("Webhook payload: %s", body)
 
     entries: list[dict] = body.get("entry", [])
     for entry in entries:
-        # New Instagram API: messages arrive under "messaging"
-        messaging_events: list[dict] = entry.get("messaging", [])
-        for event in messaging_events:
+        for event in entry.get("messaging", []):
             await _handle_messaging_event(event, db)
 
-        # Instagram Webhooks API: some events arrive under "changes"
-        changes: list[dict] = entry.get("changes", [])
-        for change in changes:
+        for change in entry.get("changes", []):
             if change.get("field") == "messages":
-                value = change.get("value", {})
-                await _handle_messaging_event(value, db)
+                await _handle_messaging_event(change.get("value", {}), db)
 
     return {"status": "ok"}
 
@@ -82,23 +77,23 @@ async def receive_webhook(
 # ─── Private helpers ─────────────────────────────────────
 
 async def _handle_messaging_event(event: dict, db: Session) -> None:
-    """Process a single messaging event from the webhook payload."""
+    """Accumulate message and (re)start the debounce timer for this sender."""
     sender_id: str | None = event.get("sender", {}).get("id")
     message_data: dict | None = event.get("message")
 
     if not sender_id or not message_data:
-        logger.debug("Skipping non‑message event: %s", event)
+        logger.debug("Skipping non-message event: %s", event)
         return
 
     text: str = message_data.get("text", "")
     if not text:
-        logger.debug("Skipping non‑text message from %s", sender_id)
+        logger.debug("Skipping non-text message from %s", sender_id)
         return
 
     # 1. Get or create conversation
     conversation = _get_or_create_conversation(db, sender_id)
 
-    # 2. Log the inbound message
+    # 2. Log the inbound message immediately
     _log_message(db, conversation.id, MessageDirection.INBOUND, text)
 
     # 3. If manual mode → do nothing more
@@ -106,32 +101,88 @@ async def _handle_messaging_event(event: dict, db: Session) -> None:
         logger.info("Conversation %s is MANUAL — skipping AI", sender_id)
         return
 
-    # 4. Build lightweight history for Ollama context
-    history = _build_history(db, conversation.id, limit=6)
+    # 4. Accumulate message in queue
+    _message_queues.setdefault(sender_id, []).append(text)
 
-    # 5. Generate AI response
-    ai_result = await ollama_service.generate_response(text, history)
+    # 5. Cancel any existing pending timer for this sender
+    existing_task = _pending_tasks.get(sender_id)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+        logger.debug("Debounce: timer reset for %s (%d msg(s) queued)", sender_id, len(_message_queues[sender_id]))
 
-    # 6. If the AI flags doubt → switch to manual
+    # 6. Start a fresh debounce timer
+    debounce_secs = get_settings().response_debounce_seconds
+    logger.info(
+        "Debounce: waiting %ds for %s to finish typing (%d msg(s) so far)",
+        debounce_secs, sender_id, len(_message_queues[sender_id]),
+    )
+    task = asyncio.create_task(
+        _debounced_respond(sender_id, conversation.id, db, debounce_secs)
+    )
+    _pending_tasks[sender_id] = task
+
+
+async def _debounced_respond(
+    sender_id: str,
+    conversation_id: int,
+    db: Session,
+    delay: int,
+) -> None:
+    """
+    Wait `delay` seconds, then respond to all accumulated messages at once.
+    If cancelled (new message arrived), exit silently.
+    """
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return  # New message came in → a new task will handle it
+
+    # Collect and clear the queue
+    messages = _message_queues.pop(sender_id, [])
+    _pending_tasks.pop(sender_id, None)
+
+    if not messages:
+        return
+
+    # Re-read conversation (mode may have changed during the wait)
+    conversation = (
+        db.query(ConversationState)
+        .filter(ConversationState.sender_id == sender_id)
+        .first()
+    )
+    if conversation is None or conversation.mode == ConversationMode.MANUAL:
+        return
+
+    # Combine all pending messages into one prompt
+    combined_message = "\n".join(messages)
+    if len(messages) > 1:
+        logger.info(
+            "Debounce: %d messages aggregated for %s → «%s»",
+            len(messages), sender_id, combined_message[:120],
+        )
+
+    # Call AI
+    history = _build_history(db, conversation_id, limit=6)
+    ai_result = await ollama_service.generate_response(combined_message, history)
+
+    # Handle needs_human
     if ai_result.needs_human:
         conversation.mode = ConversationMode.MANUAL
         db.commit()
         _log_message(
-            db, conversation.id, MessageDirection.OUTBOUND,
+            db, conversation_id, MessageDirection.OUTBOUND,
             ai_result.response or "[flagged for human]",
             needs_human=True,
         )
         logger.warning(
-            "🚨 ALERTE — IA pas sûre pour %s. Message client : « %s ». "
-            "Conversation basculée en MANUEL.",
-            sender_id,
-            text,
+            "🚨 ALERTE — IA pas sûre pour %s. Messages : «%s». Basculée en MANUEL.",
+            sender_id, combined_message,
         )
         return
 
-    # 7. Simulate a human delay then reply
+    # Create iCloud appointment + send reply
     asyncio.create_task(
-        _delayed_reply(sender_id, ai_result.response, conversation.id, db)
+        _delayed_reply(sender_id, ai_result.response, conversation_id, db, ai_result.book)
     )
 
 
@@ -140,8 +191,35 @@ async def _delayed_reply(
     reply_text: str,
     conversation_id: int,
     db: Session,
+    booking=None,
 ) -> None:
-    """Wait, then send the reply and log it."""
+    """Create the iCloud event if needed, simulate delay, then send the reply."""
+    from app.services.calendar_service import ICloudCalendar
+    from datetime import datetime, date as _date, timedelta
+
+    if booking is not None:
+        try:
+            cal = ICloudCalendar()
+            rdv_date = _date.fromisoformat(booking.date)
+            start_dt = datetime.combine(
+                rdv_date,
+                datetime.min.time().replace(hour=booking.hour, minute=booking.minute),
+            )
+            end_dt = start_dt + timedelta(minutes=booking.duration_minutes)
+            cal.create_event(
+                summary=booking.service,
+                start=start_dt,
+                end=end_dt,
+                description="RDV posé via Instagram par Kyana IA",
+                test_event=False,
+            )
+            logger.info(
+                "✅ RDV créé dans iCloud : %s le %s à %sh%02d",
+                booking.service, booking.date, booking.hour, booking.minute,
+            )
+        except Exception as e:
+            logger.error("⚠️ Impossible de créer le RDV dans iCloud : %s", e)
+
     await instagram_service.simulate_human_delay()
     success = await instagram_service.send_message(sender_id, reply_text)
     if success:
@@ -191,10 +269,7 @@ def _build_history(
     conversation_id: int,
     limit: int = 6,
 ) -> list[dict[str, str]]:
-    """
-    Build an Ollama‑compatible conversation history from the last *limit*
-    messages (oldest → newest).
-    """
+    """Build Ollama-compatible history from the last *limit* messages."""
     messages = (
         db.query(MessageLog)
         .filter(MessageLog.conversation_id == conversation_id)

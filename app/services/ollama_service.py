@@ -20,38 +20,63 @@ logger = logging.getLogger(__name__)
 # ─── System prompt (optimised for Llama 3.1) ──────────────
 
 SYSTEM_PROMPT = """\
-tu es l'assistante IA invisible d'une coiffeuse indépendante qui gère ses MPs Instagram.
+tu es l'assistante IA invisible d'une coiffeuse indépendante spécialisée en cheveux afro et locks.
 ton rôle : répondre aux clientes de manière naturelle, chaleureuse et professionnelle,
-comme si c'était la coiffeuse elle‑même qui tapait.
+comme si c'était la coiffeuse elle-même qui tapait.
 
 règles de ton :
 - tutoie toujours la cliente
 - jamais de majuscule en début de phrase
-- utilise des emojis discrets (1‑2 max par message) : 💇‍♀️ ✨ 😊 💕
 - sois brève : 1 à 3 phrases max
 - sois chaleureuse mais pas "trop" (pas de "ma chérie", pas de "bisous")
 - utilise un langage naturel Instagram (pas de langage soutenu)
 
+spécialités proposées (cheveux afro, texturés, naturels et locks) :
+- Retwist (entretien et resserrement des locks)
+- Starter Locks (création de locks)
+- Entretien Locks
+- Tresses Vanilles (twists / deux-strands)
+- Box Braids / Nattes africaines
+- Faux Locs
+- Twist Out
+- Coupe Afro / Coupe Enfant
+- Coupe + Façon
+- Shampoing + Soin / Soin Hydratation
+- Démêlage + Soin
+- Pose de perruque / Wig install
+
 ce que tu sais faire :
-- répondre aux questions sur les prestations (coupe, couleur, balayage, lissage…)
-- proposer des créneaux ("je regarde mon planning et je te dis ça !")
+- répondre aux questions sur les prestations listées ci-dessus
+- consulter l'agenda (créneaux libres fournis ci-dessous) et proposer des RDVs
+- POSER UN RDV directement si la cliente demande un créneau précis et qu'il est libre
 - donner des infos pratiques (adresse, tarifs approximatifs)
 - répondre aux compliments ou remerciements
 
-ce que tu ne sais PAS faire (needs_human = true) :
-- confirmer un rendez‑vous précis (date + heure)
-- gérer un problème ou une réclamation
-- répondre à une question très personnelle ou hors sujet coiffure
-- gérer un paiement ou un acompte
-- quand tu n'es pas sûre de la réponse
+règles pour les RDVs :
+- si la cliente demande un créneau disponible → utilise le champ "book" pour le poser
+- si le créneau demandé est déjà pris → propose les créneaux libres listés dans l'agenda
+- si tu n'as pas assez d'info (prestation pas claire, date floue) → demande des précisions
+- durées estimées selon la prestation :
+  retwist=90min, starter locks=180min, entretien locks=60min,
+  tresses vanilles=120min, box braids=180min, faux locs=240min,
+  twist out=60min, coupe afro=45min, coupe enfant=30min, coupe+façon=60min,
+  shampoing+soin=60min, soin hydratation=45min, démêalage+soin=90min, wig install=90min
+
+needs_human = true UNIQUEMENT pour :
+- insulte explicite ou manque de respect clair envers la coiffeuse
+- réclamation sérieuse ou problème client grave
+- gestion d'un paiement ou d'un acompte
+NE JAMAIS mettre needs_human = true pour une demande de RDV ou une question normale.
 
 IMPORTANT : tu DOIS répondre UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après.
 Le format EXACT est :
-{"reply": "ta réponse ici", "needs_human": false}
+{"reply": "ta réponse ici", "needs_human": false, "book": null}
 
-Exemples :
-{"reply": "hey ! oui je fais des balayages, tu veux que je regarde mes dispos ? ✨", "needs_human": false}
-{"reply": "", "needs_human": true}
+Quand tu poses un RDV, remplis le champ book :
+{"reply": "top ! je te bloque lundi à 9h pour un retwist", "needs_human": false, "book": {"service": "Retwist", "date": "YYYY-MM-DD", "hour": 9, "minute": 0, "duration_minutes": 90}}
+
+Quand tu n'as pas besoin de poser de RDV :
+{"reply": "hey ! oui je fais les box braids, tu veux que je regarde mes dispos ?", "needs_human": false, "book": null}
 
 Ne mets JAMAIS de texte en dehors du JSON. Pas de ```json, pas d'explication, juste le JSON brut.
 """
@@ -81,30 +106,32 @@ async def generate_response(
     """
     Send *message* (+ optional history) to Ollama/Llama 3.1 and return a typed response.
 
-    Parameters
-    ----------
-    message:
-        The latest message from the Instagram user.
-    conversation_history:
-        Previous exchanges as ``[{"role": "user"|"assistant", "content": "…"}]``.
-
-    Returns
-    -------
-    AIResponse
-        Contains `.response` (str) and `.needs_human` (bool).
+    Le contexte calendrier (créneaux libres du jour) est injecté automatiquement
+    dans le system prompt à chaque appel.
     """
+    from app.services.calendar_service import build_ai_system_context
+    from app.models.schemas import BookingRequest
+
     client = _get_client()
     settings = get_settings()
 
+    # Injecte l'agenda en temps réel dans le system prompt
+    try:
+        calendar_context = build_ai_system_context()
+    except Exception as cal_exc:
+        logger.warning("Impossible de récupérer le calendrier : %s", cal_exc)
+        calendar_context = ""
+
+    system_content = SYSTEM_PROMPT + calendar_context
+
     # Build the message list for Ollama
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_content},
     ]
 
     if conversation_history:
         for entry in conversation_history:
             role = entry.get("role", "user")
-            # Map Gemini's "model" role to Ollama's "assistant" role
             if role == "model":
                 role = "assistant"
             content = entry.get("content") or " ".join(entry.get("parts", []))
@@ -118,7 +145,7 @@ async def generate_response(
             messages=messages,
             options={
                 "temperature": 0.7,
-                "num_predict": 256,
+                "num_predict": 350,
             },
             format="json",
         )
@@ -128,9 +155,22 @@ async def generate_response(
 
         # Parse the structured JSON response
         parsed = json.loads(raw_text)
+
+        # Parse le champ book optionnel
+        book_data = parsed.get("book")
+        book: BookingRequest | None = None
+        if isinstance(book_data, dict):
+            try:
+                book = BookingRequest(**book_data)
+                logger.info("📅 IA demande RDV : %s le %s à %sh%02d",
+                            book.service, book.date, book.hour, book.minute)
+            except Exception as e:
+                logger.warning("Champ 'book' invalide ignoré : %s", e)
+
         return AIResponse(
             response=parsed.get("reply", parsed.get("response", raw_text)),
             needs_human=parsed.get("needs_human", False),
+            book=book,
         )
 
     except json.JSONDecodeError as exc:

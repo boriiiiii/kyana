@@ -1,12 +1,12 @@
-.PHONY: dev run test install setup
+.PHONY: dev run test install setup ngrok tunnel
 
 # Lancer le serveur en mode dev (avec hot-reload)
 dev:
-	uvicorn app.main:app --reload
+	. venv/bin/activate && uvicorn app.main:app --reload
 
 # Lancer le serveur (sans reload)
 run:
-	uvicorn app.main:app
+	. venv/bin/activate && uvicorn app.main:app
 
 # Lancer les tests
 test:
@@ -22,3 +22,10 @@ setup:
 	. venv/bin/activate && pip install -r requirements.txt
 	cp -n .env.example .env 2>/dev/null || true
 	@echo "✅ Setup terminé ! Active le venv : source venv/bin/activate"
+
+# Exposer le serveur local sur internet via ngrok (pour les webhooks Instagram)
+ngrok:
+	ngrok http 8000
+
+# Alias pratique
+tunnel: ngrok

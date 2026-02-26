@@ -10,13 +10,27 @@ from pydantic import BaseModel, Field
 
 # ─── AI Response ──────────────────────────────────────────
 
+class BookingRequest(BaseModel):
+    """Données de réservation retournées par l'IA quand elle crée un RDV."""
+
+    service: str = Field(..., description="Nom de la prestation (ex: 'Retwist')")
+    date: str = Field(..., description="Date au format YYYY-MM-DD")
+    hour: int = Field(..., ge=0, le=23, description="Heure de début (0-23)")
+    minute: int = Field(0, ge=0, le=59, description="Minute de début (0-59)")
+    duration_minutes: int = Field(60, ge=15, le=480, description="Durée en minutes")
+
+
 class AIResponse(BaseModel):
     """Structured output expected from the LLM (Ollama / Llama 3.1)."""
 
     response: str = Field(..., description="The AI-generated reply text")
     needs_human: bool = Field(
         False,
-        description="True when the AI is unsure and a human should take over",
+        description="True uniquement pour insulte/réclamation grave — jamais pour un RDV",
+    )
+    book: BookingRequest | None = Field(
+        None,
+        description="Si l'IA veut poser un RDV, renseigne ce champ",
     )
 
 
