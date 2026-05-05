@@ -1,4 +1,4 @@
-.PHONY: dev run test install setup ngrok tunnel
+.PHONY: dev run front start test install setup ngrok tunnel
 
 # Lancer le serveur en mode dev (avec hot-reload)
 dev:
@@ -26,6 +26,14 @@ setup:
 # Exposer le serveur local sur internet via ngrok (pour les webhooks Instagram)
 ngrok:
 	ngrok http 8000
+
+# Lancer le frontend Next.js
+front:
+	cd frontend && npm run dev
+
+# Lancer backend + frontend en parallèle
+start:
+	. venv/bin/activate && uvicorn app.main:app --reload & cd frontend && npm run dev
 
 # Alias pratique
 tunnel: ngrok

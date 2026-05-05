@@ -40,9 +40,6 @@ async def send_message(recipient_id: str, text: str) -> bool:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
-            logger.info(
-                "Message sent to %s (status=%s)", recipient_id, resp.status_code
-            )
             return True
 
     except httpx.HTTPStatusError as exc:
@@ -68,7 +65,6 @@ def verify_webhook(mode: str, token: str, challenge: str) -> str | None:
     """
     settings = get_settings()
     if mode == "subscribe" and token == settings.insta_verify_token:
-        logger.info("Webhook verified successfully")
         return challenge
     logger.warning("Webhook verification failed (mode=%s)", mode)
     return None
@@ -85,5 +81,4 @@ async def simulate_human_delay() -> None:
     """
     # delay = random.uniform(30, 120)
     delay = 5
-    logger.info("Simulating human delay: %.1f s", delay)
     await asyncio.sleep(delay)

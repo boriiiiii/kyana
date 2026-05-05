@@ -93,6 +93,7 @@ class FreeSlot:
 
     @property
     def duration_minutes(self) -> int:
+        """Durée du créneau en minutes."""
         return int((self.end - self.start).total_seconds() / 60)
 
     def label(self) -> str:
@@ -127,23 +128,24 @@ class MockCalendar:
 
         summaries = [apt[0] for apt in _MOCK_APPOINTMENTS]
         weights = [apt[3] for apt in _MOCK_APPOINTMENTS]
-        apt_map = {apt[0]: (apt[1], apt[2]) for apt in _MOCK_APPOINTMENTS}
+        # Lookup rapide : nom → (heure_début, heure_fin)
+        appointment_hours: dict[str, tuple[int, int]] = {apt[0]: (apt[1], apt[2]) for apt in _MOCK_APPOINTMENTS}
 
         # Tire entre 3 et 6 RDVs distincts pour la journée
-        n = rng.randint(3, 6)
-        chosen_names: list[str] = rng.choices(summaries, weights=weights, k=n * 3)
+        target_count = rng.randint(3, 6)
+        # Tire plus de candidats que nécessaire pour pouvoir dédoublonner
+        candidate_names: list[str] = rng.choices(summaries, weights=weights, k=target_count * 3)
 
         events: list[CalendarEvent] = []
-        used_hours: set[int] = set()
+        occupied_start_hours: set[int] = set()  # évite deux RDVs à la même heure de début
 
-        for name in chosen_names:
-            if len(events) >= n:
+        for name in candidate_names:
+            if len(events) >= target_count:
                 break
-            h_start, h_end = apt_map[name]
-            # Évite les RDVs qui démarrent à la même heure
-            if h_start in used_hours:
+            h_start, h_end = appointment_hours[name]
+            if h_start in occupied_start_hours:
                 continue
-            used_hours.add(h_start)
+            occupied_start_hours.add(h_start)
 
             events.append(
                 CalendarEvent(
@@ -228,13 +230,16 @@ class ICloudCalendar:
         _READONLY_KEYWORDS = {"rappels", "reminders", "anniversaires", "birthdays"}
 
         def _is_readonly(cal) -> bool:
+            """Retourne True si le calendrier est de type Rappels/Anniversaires (lecture seule pour VEVENT)."""
             name_lower = (cal.name or "").lower()
             return any(kw in name_lower for kw in _READONLY_KEYWORDS)
 
         def _name(cal) -> str:
+            """Retourne le nom du calendrier en minuscules."""
             return (cal.name or "").lower()
 
         def _url(cal) -> str:
+            """Retourne l'URL CalDAV du calendrier en minuscules."""
             return str(cal.url).lower()
 
         # 1. Nom explicitement configuré via .env
@@ -242,7 +247,6 @@ class ICloudCalendar:
         if target_name:
             cal = next((c for c in calendars if _name(c) == target_name), None)
             if cal:
-                logger.info("Calendrier sélectionné (CALDAV_CALENDAR_NAME) : %s", cal.name)
                 self._calendar_cache = cal
                 return cal
             logger.warning(
@@ -278,7 +282,6 @@ class ICloudCalendar:
                 cal.name,
             )
 
-        logger.info("ICloudCalendar connecté — calendrier : %s", cal.name)
         self._calendar_cache = cal
         return cal
 
@@ -341,11 +344,6 @@ class ICloudCalendar:
                     logger.warning("Impossible de parser un événement : %s", parse_exc)
                     continue
 
-            logger.info(
-                "ICloudCalendar: %d événement(s) trouvé(s) pour %s",
-                len(events),
-                target_date,
-            )
             return sorted(events)
 
         except (ValueError, ConnectionError):
@@ -499,40 +497,41 @@ def get_free_slots(target_date: date) -> list[FreeSlot]:
     day_start = datetime.combine(target_date, WORK_START)
     day_end = datetime.combine(target_date, WORK_END)
 
-    # Fusionner les événements chevauchants et trier
+    # Clamp chaque événement dans la plage horaire de travail
     occupied: list[tuple[datetime, datetime]] = []
     for ev in events:
-        ev_s = max(ev.start, day_start)
-        ev_e = min(ev.end, day_end)
-        if ev_s < ev_e:
-            occupied.append((ev_s, ev_e))
+        clamped_start = max(ev.start, day_start)
+        clamped_end = min(ev.end, day_end)
+        if clamped_start < clamped_end:
+            occupied.append((clamped_start, clamped_end))
 
     occupied.sort()
 
     # Fusionner les intervalles qui se chevauchent
     merged: list[tuple[datetime, datetime]] = []
-    for seg_start, seg_end in occupied:
-        if merged and seg_start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], seg_end))
+    for interval_start, interval_end in occupied:
+        if merged and interval_start <= merged[-1][1]:
+            # Chevauchement : étend le dernier intervalle si nécessaire
+            merged[-1] = (merged[-1][0], max(merged[-1][1], interval_end))
         else:
-            merged.append((seg_start, seg_end))
+            merged.append((interval_start, interval_end))
 
     # Identifier les trous entre les RDVs
     free_slots: list[FreeSlot] = []
-    cursor = day_start
+    scan_position = day_start  # avance au fil des RDVs pour trouver les trous
 
-    for seg_start, seg_end in merged:
-        if cursor < seg_start:
-            duration = (seg_start - cursor).total_seconds() / 60
-            if duration >= MIN_SLOT_MINUTES:
-                free_slots.append(FreeSlot(start=cursor, end=seg_start))
-        cursor = max(cursor, seg_end)
+    for interval_start, interval_end in merged:
+        if scan_position < interval_start:
+            gap_minutes = (interval_start - scan_position).total_seconds() / 60
+            if gap_minutes >= MIN_SLOT_MINUTES:
+                free_slots.append(FreeSlot(start=scan_position, end=interval_start))
+        scan_position = max(scan_position, interval_end)
 
     # Créneau après le dernier RDV
-    if cursor < day_end:
-        duration = (day_end - cursor).total_seconds() / 60
-        if duration >= MIN_SLOT_MINUTES:
-            free_slots.append(FreeSlot(start=cursor, end=day_end))
+    if scan_position < day_end:
+        remaining_minutes = (day_end - scan_position).total_seconds() / 60
+        if remaining_minutes >= MIN_SLOT_MINUTES:
+            free_slots.append(FreeSlot(start=scan_position, end=day_end))
 
     return free_slots
 
@@ -573,14 +572,14 @@ def build_calendar_context(target_date: date) -> str:
     date_label = f"{day_name} {day_num}{suffix} {month_name}"
 
     if target_date.weekday() in CLOSED_DAYS:
-        return f"📅 {date_label.capitalize()} — fermée ce jour-là."
+        return f"{date_label.capitalize()} — fermée ce jour-là."
 
     slots = get_free_slots(target_date)
 
     if not slots:
-        return f"📅 {date_label.capitalize()} — plus aucune disponibilité."
+        return f"{date_label.capitalize()} — plus aucune disponibilité."
 
-    lines = [f"📅 {date_label.capitalize()} — créneaux disponibles :"]
+    lines = [f"{date_label.capitalize()} — créneaux disponibles :"]
     for slot in slots:
         lines.append(f"  • {slot.label()}")
 
@@ -591,8 +590,8 @@ def build_ai_system_context(target_date: date | None = None) -> str:
     """
     Construit le bloc de contexte agenda à insérer dans le system prompt de l'IA.
 
-    Inclut aujourd'hui ET demain pour que l'IA puisse répondre aux questions
-    du type «t'as de la place demain ?».
+    Inclut les 7 prochains jours pour que l'IA puisse répondre aux questions
+    sur n'importe quel jour de la semaine sans inventer de date.
 
     Parameters
     ----------
@@ -605,24 +604,26 @@ def build_ai_system_context(target_date: date | None = None) -> str:
         Bloc de texte à concaténer au SYSTEM_PROMPT existant.
     """
     today = target_date or date.today()
-    tomorrow = today + timedelta(days=1)
-
     DAYS_FR = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
-    today_fr = DAYS_FR[today.weekday()]
-    tomorrow_fr = DAYS_FR[tomorrow.weekday()]
 
-    today_ctx = build_calendar_context(today)
-    tomorrow_ctx = build_calendar_context(tomorrow)
+    lines = [
+        "\n\n--- AGENDA (informations temps réel, 7 prochains jours) ---",
+        f"Aujourd'hui : {DAYS_FR[today.weekday()]} {today.strftime('%d/%m/%Y')} (date ISO : {today.isoformat()})",
+    ]
 
-    return (
-        f"\n\n--- AGENDA (informations temps réel) ---\n"
-        f"📌 Aujourd'hui : {today_fr} {today.strftime('%d/%m/%Y')} (date ISO : {today.isoformat()})\n"
-        f"📌 Demain      : {tomorrow_fr} {tomorrow.strftime('%d/%m/%Y')} (date ISO : {tomorrow.isoformat()})\n"
-        f"\n{today_ctx}\n"
-        f"{tomorrow_ctx}\n"
-        "----------------------------------------\n"
+    for i in range(7):
+        d = today + timedelta(days=i)
+        label = "Aujourd'hui" if i == 0 else ("Demain" if i == 1 else DAYS_FR[d.weekday()].capitalize())
+        ctx = build_calendar_context(d)
+        lines.append(f"\n[{label} — {d.strftime('%d/%m/%Y')} / ISO : {d.isoformat()}]")
+        lines.append(ctx)
+
+    lines.append("----------------------------------------")
+    lines.append(
         "IMPORTANT pour les RDVs : utilise TOUJOURS la date ISO exacte (YYYY-MM-DD) dans le champ 'date' du JSON. "
-        "Ne devine JAMAIS la date — utilise uniquement les dates ISO fournies ci-dessus ou calculées à partir d'elles.\n"
-        "Utilise ces informations pour proposer des créneaux précis. "
-        "Si aucun créneau n'est disponible, dis-le naturellement.\n"
+        "Ne devine JAMAIS la date — utilise uniquement les dates ISO fournies ci-dessus.\n"
+        "Propose TOUJOURS le premier créneau disponible réel — ne dis jamais 'vendredi' si "
+        "un créneau libre existe plus tôt dans la semaine."
     )
+
+    return "\n".join(lines) + "\n"

@@ -31,3 +31,22 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+#back
+data/
+todo.txt
+
+models
+*.gguf
+*.bin
+*.joblib
+venv/
+scripts/
+
+node_modules/
+
+.next/
+frontend/.next/
+out/
+build/
+dist/

@@ -31,9 +31,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Create database tables on startup."""
-    logger.info("Creating database tables…")
     Base.metadata.create_all(bind=engine)
-    logger.info("Kyana is ready 💇‍♀️")
+    logger.info("Kyana is ready")
     yield
     logger.info("Shutting down…")
 

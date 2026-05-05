@@ -86,9 +86,23 @@ async def _handle_messaging_event(event: dict, db: Session) -> None:
         return
 
     text: str = message_data.get("text", "")
-    if not text:
-        logger.debug("Skipping non-text message from %s", sender_id)
+    attachments: list = message_data.get("attachments", [])
+
+    if not text and not attachments:
+        logger.debug("Skipping non-text, non-attachment message from %s", sender_id)
         return
+
+    if not text and attachments:
+        attachment_type = attachments[0].get("type", "media") if attachments else "media"
+        if attachment_type == "image":
+            text = "[photo envoyée]"
+        elif attachment_type == "audio":
+            text = "[message vocal envoyé]"
+        elif attachment_type == "video":
+            text = "[vidéo envoyée]"
+        else:
+            text = f"[{attachment_type} envoyé]"
+        logger.info("Média reçu de %s : %s", sender_id, text)
 
     # 1. Get or create conversation
     conversation = _get_or_create_conversation(db, sender_id)
@@ -98,24 +112,18 @@ async def _handle_messaging_event(event: dict, db: Session) -> None:
 
     # 3. If manual mode → do nothing more
     if conversation.mode == ConversationMode.MANUAL:
-        logger.info("Conversation %s is MANUAL — skipping AI", sender_id)
         return
 
     # 4. Accumulate message in queue
     _message_queues.setdefault(sender_id, []).append(text)
 
     # 5. Cancel any existing pending timer for this sender
-    existing_task = _pending_tasks.get(sender_id)
-    if existing_task and not existing_task.done():
-        existing_task.cancel()
-        logger.debug("Debounce: timer reset for %s (%d msg(s) queued)", sender_id, len(_message_queues[sender_id]))
+    pending_task = _pending_tasks.get(sender_id)
+    if pending_task and not pending_task.done():
+        pending_task.cancel()
 
     # 6. Start a fresh debounce timer
     debounce_secs = get_settings().response_debounce_seconds
-    logger.info(
-        "Debounce: waiting %ds for %s to finish typing (%d msg(s) so far)",
-        debounce_secs, sender_id, len(_message_queues[sender_id]),
-    )
     task = asyncio.create_task(
         _debounced_respond(sender_id, conversation.id, db, debounce_secs)
     )
@@ -155,32 +163,36 @@ async def _debounced_respond(
 
     # Combine all pending messages into one prompt
     combined_message = "\n".join(messages)
-    if len(messages) > 1:
-        logger.info(
-            "Debounce: %d messages aggregated for %s → «%s»",
-            len(messages), sender_id, combined_message[:120],
-        )
+    logger.info("Message recu [%s] : «%s»", sender_id, combined_message[:120])
 
-    # Call AI
-    history = _build_history(db, conversation_id, limit=6)
+    # Call AI — exclure les messages du batch courant de l'historique (ils sont déjà
+    # dans combined_message, les inclure aussi dans history les doublerait)
+    history = _build_history(db, conversation_id, limit=50, exclude_last=len(messages))
     ai_result = await ollama_service.generate_response(combined_message, history)
 
-    # Handle needs_human
+    # Handle needs_human — passe en MANUAL silencieusement (aucun message envoyé)
     if ai_result.needs_human:
         conversation.mode = ConversationMode.MANUAL
         db.commit()
+        # On logue uniquement l'événement interne (dashboard), pas de message envoyé à la cliente
         _log_message(
             db, conversation_id, MessageDirection.OUTBOUND,
-            ai_result.response or "[flagged for human]",
+            ai_result.response or "[basculé en manuel — IA incertaine]",
             needs_human=True,
         )
         logger.warning(
-            "🚨 ALERTE — IA pas sûre pour %s. Messages : «%s». Basculée en MANUEL.",
-            sender_id, combined_message,
+            "ALERTE — IA incertaine pour %s (conversation id=%d) — basculée en MANUEL (aucun msg envoyé). "
+            "Pour remettre en AUTO : PATCH /api/conversations/%d/mode  {\"mode\": \"auto\"}\n"
+            "Messages reçus : «%s»",
+            sender_id, conversation.id, conversation.id, combined_message,
         )
-        return
+        return  # La vraie coiffeuse reprend la main, le client ne voit rien
 
     # Create iCloud appointment + send reply
+    if ai_result.book is not None:
+        # Injecte le sender_id comme identifiant Instagram (connu côté webhook, pas côté IA)
+        ai_result.book.instagram_user = sender_id
+
     asyncio.create_task(
         _delayed_reply(sender_id, ai_result.response, conversation_id, db, ai_result.book)
     )
@@ -194,6 +206,7 @@ async def _delayed_reply(
     booking=None,
 ) -> None:
     """Create the iCloud event if needed, simulate delay, then send the reply."""
+    # Imports différés pour éviter les imports circulaires au niveau du module
     from app.services.calendar_service import ICloudCalendar
     from datetime import datetime, date as _date, timedelta
 
@@ -206,19 +219,40 @@ async def _delayed_reply(
                 datetime.min.time().replace(hour=booking.hour, minute=booking.minute),
             )
             end_dt = start_dt + timedelta(minutes=booking.duration_minutes)
+
+            # Titre clair : "Retwist — Julie (@julie.insta)"
+            name_parts = []
+            if booking.first_name:
+                name_parts.append(booking.first_name)
+            if booking.instagram_user:
+                name_parts.append(f"(@{booking.instagram_user})")
+            client_label = " ".join(name_parts) if name_parts else "cliente Instagram"
+            event_summary = f"{booking.service} — {client_label}"
+
+            # Description : notes + identité
+            desc_lines = []
+            if booking.first_name:
+                desc_lines.append(f"Prénom : {booking.first_name}")
+            if booking.instagram_user:
+                desc_lines.append(f"Instagram : @{booking.instagram_user}")
+            if booking.notes:
+                desc_lines.append(f"Notes : {booking.notes}")
+            desc_lines.append("RDV posé via Kyana IA")
+            description = "\n".join(desc_lines)
+
             cal.create_event(
-                summary=booking.service,
+                summary=event_summary,
                 start=start_dt,
                 end=end_dt,
-                description="RDV posé via Instagram par Kyana IA",
+                description=description,
                 test_event=False,
             )
             logger.info(
-                "✅ RDV créé dans iCloud : %s le %s à %sh%02d",
-                booking.service, booking.date, booking.hour, booking.minute,
+                "RDV créé dans iCloud : %s le %s à %sh%02d",
+                event_summary, booking.date, booking.hour, booking.minute,
             )
         except Exception as e:
-            logger.error("⚠️ Impossible de créer le RDV dans iCloud : %s", e)
+            logger.error("Impossible de créer le RDV dans iCloud : %s", e)
 
     await instagram_service.simulate_human_delay()
     success = await instagram_service.send_message(sender_id, reply_text)
@@ -240,7 +274,6 @@ def _get_or_create_conversation(db: Session, sender_id: str) -> ConversationStat
         db.add(conv)
         db.commit()
         db.refresh(conv)
-        logger.info("New conversation created for %s", sender_id)
     return conv
 
 
@@ -267,17 +300,27 @@ def _log_message(
 def _build_history(
     db: Session,
     conversation_id: int,
-    limit: int = 6,
+    limit: int = 10,
+    exclude_last: int = 0,
 ) -> list[dict[str, str]]:
-    """Build Ollama-compatible history from the last *limit* messages."""
+    """Build Ollama-compatible history from the last *limit* messages.
+
+    ``exclude_last`` messages are fetched but discarded from the tail — used to
+    strip the current debounce batch (already in ``combined_message``) from the
+    history so it doesn't appear twice in the Ollama context.
+    """
+    fetch_count = limit + exclude_last
     messages = (
         db.query(MessageLog)
         .filter(MessageLog.conversation_id == conversation_id)
         .order_by(MessageLog.created_at.desc())
-        .limit(limit)
+        .limit(fetch_count)
         .all()
     )
     messages.reverse()
+
+    if exclude_last:
+        messages = messages[:-exclude_last] if len(messages) > exclude_last else []
 
     history: list[dict[str, str]] = []
     for msg in messages:

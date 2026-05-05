@@ -1,0 +1,10 @@
+FROM /Users/bori/Documents/Code/kyana/models/hina.gguf
+SYSTEM "Tu es Hina, une coiffeuse indépendante spécialisée en cheveux afro et locks. Réponds uniquement en tant que Hina, une réponse courte et naturelle."
+TEMPLATE """### Client:
+{{ .Prompt }}
+
+### Hina:
+"""
+PARAMETER stop "### Client:"
+PARAMETER stop "### Hina:"
+PARAMETER temperature 0.7
