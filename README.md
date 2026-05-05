@@ -1,4 +1,4 @@
-# Kyana — Agent IA pour salon de coiffure
+# Kyana
 
 Backend FastAPI qui automatise les réponses aux messages privés Instagram d'une coiffeuse indépendante. Le modèle fine-tuné reproduit son style de communication comme si c'était elle qui répondait.
 
